@@ -1556,3 +1556,122 @@ def DefaultController( name, controllers=DefaultControllers, **kwargs ):
 def NullController( *_args, **_kwargs ):
     "Nonexistent controller - simply returns None"
     return None
+
+
+class VPPSwitch( Switch ):
+    "VPP vSwitch switch. Depends on vppctl"
+
+    def __init__( self, name, failMode='open', datapath='user',
+                  inband=False, protocols=None,
+                  reconnectms=1000, stp=False, batch=False, **params ):
+        """name: name for switch
+           failMode: controller loss behavior (secure|open)
+           datapath: userspace or kernel mode (kernel|user)
+           inband: use in-band control (False)
+           protocols: use specific OpenFlow version(s) (e.g. OpenFlow13)
+                      Unspecified (or old OVS version) uses OVS default
+           reconnectms: max reconnect timeout in ms (0/None for default)
+           stp: enable STP (False, requires failMode=standalone)
+           batch: enable batch startup (False)"""
+        Switch.__init__( self, name, **params )
+        self.failMode = failMode
+        self.datapath = datapath
+        self.inband = inband
+        self.protocols = protocols
+        self.reconnectms = reconnectms
+        self.stp = stp
+        self._uuids = []  # controller UUIDs
+        self.batch = batch
+        self.commands = []  # saved commands for batch startup
+
+    @classmethod
+    def setup( cls ):
+        print "Make sure VPP vSwitch is installed and working"
+
+        out, err, exitcode = errRun( 'vppctl show version' )
+        if exitcode or out == '\n':
+            error( out + err +
+                'vppctl exited with code %d\n' % exitcode +
+                '*** make sure vpp is running\n')
+
+    def dpctl( self, *args ):
+        return self.cmd( 'vppctl ' + ' '.join(args) )
+
+    def vsctl( self, *args ):
+        "Run vppctl command"
+        return self.cmd( 'vppctl ' + ' '.join(args) )
+
+    def attach( self, intf ):
+        "Connect a data port"
+        self.vsctl( 'create host-interface name ' + intf.name )
+        self.vsctl( 'set interface state ', 'host-'+intf.name , 'up')
+	self.vsctl( 'set interface l2 bridge', 'host-'+intf.name,  self.name[1:])
+        self.cmd( 'ifconfig', intf.name, 'up' )
+
+    def detach( self, intf ):
+        "Disconnect a data port"
+        self.vsctl( 'delete host-interface ', self, intf )
+
+    def controllerUUIDs( self, update=False ):
+        return self._uuids
+
+    def connected( self ):
+        "Are we connected to at least one of our controllers?"
+        for uuid in self.controllerUUIDs():
+            if 'true' in self.vsctl( '-- get Controller',
+                                     uuid, 'is_connected' ):
+                return True
+        return self.failMode == 'standalone' or self.failMode == 'open'
+
+    def intfOpts( self, intf ):
+        "Return OVS interface options for intf"
+        opts = ''
+        """
+            # ofport_request is not supported on old OVS
+            opts += ' ofport_request=%s' % self.ports[ intf ]
+            # Patch ports don't work well with old OVS
+            if isinstance( intf, OVSIntf ):
+                intf1, intf2 = intf.link.intf1, intf.link.intf2
+                peer = intf1 if intf1 != intf else intf2
+                opts += ' type=patch options:peer=%s' % peer
+        return '' if not opts else ' -- set Interface %s' % intf + opts
+        """
+        return ''
+
+    def bridgeOpts( self ):
+        "Return OVS bridge options"
+        opts = ( ' other_config:datapath-id=%s' % self.dpid +
+                 ' fail_mode=%s' % self.failMode )
+        if not self.inband:
+            opts += ' other-config:disable-in-band=true'
+        if self.datapath == 'user':
+            opts += ' datapath_type=netdev'
+        if self.protocols:
+            opts += ' protocols=%s' % self.protocols
+        if self.stp and self.failMode == 'standalone':
+            opts += ' stp_enable=true' % self
+        return opts
+
+    def start( self, controllers ):
+        "Start up a new VPP switch"
+        int( self.dpid, 16 )  # DPID must be a hex string
+        # Command to add interfaces
+        for intf in self.intfList():
+		 if self.ports[ intf ] and not intf.IP():
+			self.attach(intf)
+
+
+    # This should be ~ int( quietRun( 'getconf ARG_MAX' ) ),
+    # but the real limit seems to be much lower
+    argmax = 128000
+
+    @classmethod
+    def batchStartup( cls, switches, run=errRun ):
+        return switches
+
+    def stop( self, deleteIntfs=True ):
+        return
+
+    @classmethod
+    def batchShutdown( cls, switches, run=errRun ):
+        return switches
